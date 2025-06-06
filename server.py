@@ -16,7 +16,16 @@ from datetime import datetime, timedelta
 from flask_compress import Compress
 
 app = Flask(__name__)
-CORS(app)
+# Explicitly configure CORS for all endpoints
+CORS(app, resources={
+    r"/api/*": {
+        "origins": ["https://proba-v-fapar.onrender.com", "http://localhost:8000"],  # Allow frontend origins
+        "methods": ["GET", "POST", "HEAD"],  # Allow POST for clip/process
+        "allow_headers": ["Content-Type"]  # Allow headers used in POST
+    },
+    r"/health": {"origins": "*"},  # Allow health check from any origin
+    r"/": {"origins": "*"}  # Allow root from any origin
+})
 Compress(app)  # Enable Gzip compression
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -229,5 +238,5 @@ def process_raster():
         return {"error": str(e)}, 500
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))  # Use Render's PORT or default to 5000
-    app.run(host='0.0.0.0', port=port, debug=False)  # Bind to 0.0.0.0, disable debug
+    port = int(os.environ.get('PORT', 5000))  # Use Render's PORT or default
+    app.run(host='0.0.0.0', port=port, debug=False)  # Bind to 0.0.0.0
