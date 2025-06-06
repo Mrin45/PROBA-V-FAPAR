@@ -44,4 +44,5 @@ app.get('/proxy', async (req, res) => {
     }
 });
 
-app.listen(3001, () => console.log('Proxy running on port 3001'));
+const port = process.env.PORT || 3000; // Use Render's PORT or default to 3000
+app.listen(port, '0.0.0.0', () => console.log(`Proxy running on port ${port}`)); // Bind to 0.0.0.0
