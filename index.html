@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FAPAR Web GIS Dashboard</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16'><path d='M8 0 L10 6 H16 L12 10 L14 16 L8 13 L2 16 L4 10 L0 6 H6 L8 0' fill='black'/></svg>">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css" onerror="loadFallbackLeafletCSS()">
+    <link rel="stylesheet" href="styles.css">
+    <script>
+        function setMessage(text, isError = false) {
+            const messageEl = document.getElementById('message') || document.createElement('p');
+            if (!messageEl.id) {
+                messageEl.id = 'message';
+                messageEl.className = 'message';
+                document.querySelector('.sidebar')?.appendChild(messageEl);
+            }
+            messageEl.textContent = text;
+            messageEl.className = isError ? 'message error' : 'message success';
+            console.log(`[${isError ? 'ERROR' : 'INFO'}] ${text}`);
+        }
+
+        function loadFallbackAxios() {
+            const script = document.createElement('script');
+            script.src = 'https://unpkg.com/axios@1.7.7/dist/axios.min.js';
+            script.onload = () => setMessage('Loaded Axios fallback');
+            script.onerror = () => setMessage('Axios fallback failed.', true);
+            document.head.appendChild(script);
+        }
+
+        function loadFallbackLeaflet() {
+            const script = document.createElement('script');
+            script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+            script.onload = () => {
+                setMessage('Loaded Leaflet fallback');
+                initMap();
+            };
+            script.onerror = () => setMessage('Leaflet fallback failed.', true);
+            document.head.appendChild(script);
+        }
+
+        function loadFallbackLeafletCSS() {
+            const link = document.createElement('link');
+            link.rel = 'stylesheet';
+            link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+            link.onload = () => setMessage('Loaded Leaflet CSS fallback');
+            link.onerror = () => setMessage('Leaflet CSS fallback failed.', true);
+            document.head.appendChild(link);
+        }
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/axios@1.7.7/dist/axios.min.js" onerror="loadFallbackAxios()"></script>
+    <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js" onerror="loadFallbackLeaflet()"></script>
+    <script src="https://cdn.jsdelivr.net/npm/shpjs@4.0.4/dist/shp.min.js" onerror="setMessage('shpjs failed.', true)"></script>
+</head>
+<body>
+    <div class="container">
+        <aside class="sidebar">
+            <h1 class="title">FAPAR Web GIS Dashboard</h1>
+            <div class="form-group">
+                <label for="shapefileInput" class="label">Upload Shapefile (.zip)</label>
+                <input type="file" id="shapefileInput" accept=".zip" class="input-file" />
+            </div>
+            <div class="form-group">
+                <label for="yearSelect" class="label">Select Year</label>
+                <select id="yearSelect" class="select">
+                    <option value="">Select Year</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="monthSelect" class="label">Select Month</label>
+                <select id="monthSelect" class="select">
+                    <option value="">Select Month</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="label">Select TIFFs for Composite</label>
+                <div id="monthlyTiffList" class="tiff-list"></div>
+                <button id="loadMoreTiffs" class="button secondary" style="display:none;">Load More</button>
+            </div>
+            <div class="form-group">
+                <label for="compositeSelect" class="label">Composite Type (Optional)</label>
+                <select id="compositeSelect" class="select">
+                    <option value="">None</option>
+                    <option value="max">Max</option>
+                    <option value="min">Min</option>
+                    <option value="mean">Mean</option>
+                    <option value="qualitymosaic">Quality Mosaic</option>
+                </select>
+            </div>
+            <button id="downloadButton" class="button primary" disabled>Download</button>
+            <p id="message" class="message"></p>
+        </aside>
+        <main>
+            <div id="map" class="map"></div>
+        </main>
+    </div>
+    <script>
+        const fallbackData = {
+            years: ['2022', '2023', '2024'],
+            months: ['202401', '202402'],
+            periods: ['20240110', '20240120', '20240220'],
+            tiffs: [
+                'c_gls_FAPAR300-FAPAR-RT0_202402200000_GLOBE_OLCI_V1.1.2.tiff',
+                'c_gls_FAPAR300-LAFTER-RT0_202402200000_GLOBE_OLCI_V1.1.2.tiff'
+            ]
+        };
+
+        const baseUrl = 'https://globalland.vito.be/download/geotiff/fraction_absorbed_par/fapar_300m_v1_10daily/';
+        const proxyUrl = 'http://localhost:3001/proxy?url=';
+        const flaskBaseUrl = 'http://localhost:5000';
+
+        let map, geojsonLayer, shapefile;
+        const ITEMS_PER_PAGE = 10;
+        let currentTiffPage = 1;
+        let allTiffs = [];
+
+        function getCachedData(key, ttl_hours = 24) {
+            const data = localStorage.getItem(key);
+            if (data) {
+                const { value, timestamp } = JSON.parse(data);
+                if (Date.now() - timestamp < ttl_hours * 3600 * 1000) {
+                    return value;
+                }
+            }
+            return null;
+        }
+
+        function setCachedData(key, value) {
+            localStorage.setItem(key, JSON.stringify({
+                value,
+                timestamp: Date.now()
+            }));
+        }
+
+        function initMap() {
+            if (typeof L === 'undefined') {
+                setMessage('Leaflet not loaded.', true);
+                return;
+            }
+            const mapDiv = document.getElementById('map');
+            if (!mapDiv) {
+                setMessage('Map container not found.', true);
+                return;
+            }
+            mapDiv.style.display = 'block';
+            console.log('Map div dimensions:', mapDiv.offsetWidth, mapDiv.offsetHeight);
+            map = L.map('map', {
+                center: [20.5937, 78.9629],
+                zoom: 5,
+                zoomControl: true
+            });
+            let tileLayer = L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png', {
+                attribution: '© <a href="https://carto.com/">CartoDB</a>',
+                maxZoom: 18,
+                tileSize: 256
+            }).addTo(map).on('tileerror', (error) => {
+                console.error('CartoDB tile loading error:', error);
+                setMessage('Failed to load CartoDB tiles. Trying OSM...', true);
+                map.removeLayer(tileLayer);
+                tileLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+                    maxZoom: 18
+                }).addTo(map).on('tileerror', (error) => {
+                    console.error('OSM tile loading error:', error);
+                    setMessage('Failed to load OSM tiles.', true);
+                });
+            });
+            setTimeout(() => {
+                map.invalidateSize();
+                console.log('Map size invalidated');
+            }, 100);
+            window.addEventListener('resize', () => {
+                map.invalidateSize();
+                console.log('Map resized');
+            });
+            console.log('Map initialized successfully');
+        }
+
+        function populateDropdown(id, options, defaultOption = 'Select') {
+            const select = document.getElementById(id);
+            select.innerHTML = `<option value="">${defaultOption}</option>`;
+            options.forEach(option => {
+                const opt = document.createElement('option');
+                opt.value = option;
+                opt.textContent = option;
+                select.appendChild(opt);
+            });
+        }
+
+        async function fetchYearsAndMonths() {
+            const cacheKey = 'vito_years_months';
+            let cached = getCachedData(cacheKey);
+            if (cached) {
+                return cached;
+            }
+            try {
+                let response = await axios.get(`${proxyUrl}${encodeURIComponent(baseUrl)}`);
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(response.data, 'text/html');
+                const years = Array.from(doc.querySelectorAll('a'))
+                    .map(a => a.href.split('/').filter(Boolean).pop())
+                    .filter(dir => /^\d{4}$/.test(dir));
+                const yearMonthMap = {};
+                await Promise.all(years.map(async (year) => {
+                    try {
+                        response = await axios.get(`${proxyUrl}${encodeURIComponent(baseUrl + year + '/')}`);
+                        const doc = parser.parseFromString(response.data, 'text/html');
+                        const periods = Array.from(doc.querySelectorAll('a'))
+                            .map(a => a.href.split('/').filter(Boolean).pop())
+                            .filter(dir => /^\d{8}$/.test(dir));
+                        yearMonthMap[year] = [...new Set(periods.map(p => p.slice(0, 6)))].sort();
+                    } catch (e) {
+                        console.warn(`Failed to fetch months for ${year}: ${e}`);
+                    }
+                }));
+                const result = { years, yearMonthMap };
+                setCachedData(cacheKey, result);
+                return result;
+            } catch (error) {
+                setMessage('Error fetching years/months. Using fallback.', true);
+                return {
+                    years: fallbackData.years,
+                    yearMonthMap: fallbackData.years.reduce((acc, y) => ({ ...acc, [y]: fallbackData.months }), {})
+                };
+            }
+        }
+
+        async function fetchTiffs(year, period) {
+            const cacheKey = `tiffs_${year}_${period}`;
+            let cached = getCachedData(cacheKey);
+            if (cached) {
+                return cached;
+            }
+            try {
+                const response = await axios.get(`${proxyUrl}${encodeURIComponent(baseUrl + year + '/' + period + '/')}`);
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(response.data, 'text/html');
+                const tiffs = Array.from(doc.querySelectorAll('a'))
+                    .map(a => a.href.split('/').filter(Boolean).pop())
+                    .filter(file => file.endsWith('.tiff'));
+                setCachedData(cacheKey, tiffs);
+                return tiffs;
+            } catch (error) {
+                setMessage(`Error fetching TIFFs for ${year}/${period}. Using fallback.`, true);
+                return fallbackData.tiffs;
+            }
+        }
+
+        function renderTiffList(tiffs, page = 1) {
+            const start = (page - 1) * ITEMS_PER_PAGE;
+            const end = start + ITEMS_PER_PAGE;
+            const monthlyTiffList = document.getElementById('monthlyTiffList');
+            const loadMoreButton = document.getElementById('loadMoreTiffs');
+            const periodTiffs = {};
+
+            tiffs.forEach(tiff => {
+                if (!periodTiffs[tiff.period]) periodTiffs[tiff.period] = [];
+                periodTiffs[tiff.period].push(tiff);
+            });
+
+            let html = '';
+            Object.keys(periodTiffs).forEach(period => {
+                const periodItems = periodTiffs[period].slice(start, end);
+                if (periodItems.length) {
+                    html += `<div class="period-section"><h3 class="period-title">${period}</h3>`;
+                    periodItems.forEach(tiff => {
+                        html += `
+                            <div class="tiff-item">
+                                <input type="checkbox" id="${period}_${tiff.file}" value="${tiff.url}">
+                                <label for="${period}_${tiff.file}">${tiff.file}</label>
+                            </div>`;
+                    });
+                    html += '</div>';
+                }
+            });
+
+            if (page === 1) {
+                monthlyTiffList.innerHTML = html;
+            } else {
+                monthlyTiffList.insertAdjacentHTML('beforeend', html);
+            }
+
+            loadMoreButton.style.display = end < tiffs.length ? 'block' : 'none';
+        }
+
+        async function populateMonthlyTiffList(year, month) {
+            const monthlyTiffList = document.getElementById('monthlyTiffList');
+            monthlyTiffList.innerHTML = '<div class="loading">Loading TIFFs...</div>';
+            currentTiffPage = 1;
+            allTiffs = [];
+            try {
+                const response = await axios.get(`${proxyUrl}${encodeURIComponent(baseUrl + year + '/')}`);
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(response.data, 'text/html');
+                const periods = Array.from(doc.querySelectorAll('a'))
+                    .map(a => a.href.split('/').filter(Boolean).pop())
+                    .filter(dir => dir.startsWith(month));
+                await Promise.all(periods.map(async (period) => {
+                    const tiffs = await fetchTiffs(year, period);
+                    tiffs.forEach(tiff => {
+                        allTiffs.push({
+                            period,
+                            file: tiff,
+                            url: `${baseUrl}${year}/${period}/${tiff}`
+                        });
+                    });
+                }));
+                if (!allTiffs.length) {
+                    monthlyTiffList.innerHTML = '<p>No TIFFs found.</p>';
+                    return;
+                }
+                renderTiffList(allTiffs, 1);
+            } catch (error) {
+                setMessage(`Error loading TIFF list: ${error.message}`, true);
+                monthlyTiffList.innerHTML = '<p>Error loading TIFFs.</p>';
+            }
+        }
+
+        function handleShapefileUpload(event) {
+            const file = event.target.files[0];
+            if (!file || !file.name.endsWith('.zip')) {
+                setMessage('Please upload a .zip shapefile', true);
+                return;
+            }
+            const reader = new FileReader();
+            reader.onload = async (e) => {
+                try {
+                    shapefile = await shp(e.target.result);
+                    if (geojsonLayer) {
+                        map.removeLayer(geojsonLayer);
+                    }
+                    geojsonLayer = L.geoJSON(shapefile, {
+                        style: { color: '#ff7800', weight: 2, fillOpacity: 0.2 }
+                    }).addTo(map);
+                    const bounds = geojsonLayer.getBounds();
+                    map.flyToBounds(bounds, { duration: 1.5, padding: [50, 50] });
+                    map.invalidateSize();
+                    setMessage('Shapefile uploaded with animation');
+                } catch (error) {
+                    setMessage(`Error processing shapefile: ${error.message}`, true);
+                }
+            };
+            reader.onerror = () => setMessage('Error reading shapefile', true);
+            reader.readAsArrayBuffer(file);
+        }
+
+        async function handleDownload() {
+            if (!shapefile) {
+                setMessage('Please upload a shapefile', true);
+                return;
+            }
+            const year = document.getElementById('yearSelect').value;
+            const month = document.getElementById('monthSelect').value;
+            const compositeType = document.getElementById('compositeSelect').value;
+            const selectedTiffs = Array.from(document.querySelectorAll('#monthlyTiffList input:checked'))
+                .map(input => input.value);
+            if (!year || !month || !selectedTiffs.length) {
+                setMessage('Please select year, month, and TIFF(s)', true);
+                return;
+            }
+            if (selectedTiffs.length > 10) {
+                setMessage('Select up to 5 TIFFs for performance', true);
+                return;
+            }
+            setMessage('Processing...');
+            const downloadButton = document.getElementById('downloadButton');
+            downloadButton.disabled = true;
+            downloadButton.classList.add('loading');
+            try {
+                if (compositeType) {
+                    const formData = new FormData();
+                    formData.append('shapefile', JSON.stringify(shapefile));
+                    formData.append('tiffs', JSON.stringify(selectedTiffs));
+                    formData.append('compositeType', compositeType);
+                    const response = await axios.post(`${flaskBaseUrl}/api/process-raster`, formData, {
+                        responseType: 'blob'
+                    });
+                    const url = window.URL.createObjectURL(new Blob([response.data]));
+                    const link = document.createElement('a');
+                    link.href = url;
+                    link.download = `FAPAR_${compositeType}_${month}.tif`;
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                    setMessage(`Downloaded ${compositeType} composite`);
+                } else {
+                    for (const tiffUrl of selectedTiffs) {
+                        const formData = new FormData();
+                        formData.append('shapefile', JSON.stringify(shapefile));
+                        formData.append('tiffUrl', tiffUrl);
+                        const response = await axios.post(`${flaskBaseUrl}/api/clip-raster`, formData, {
+                            responseType: 'blob'
+                        });
+                        const url = window.URL.createObjectURL(new Blob([response.data]));
+                        const link = document.createElement('a');
+                        link.href = url;
+                        link.download = tiffUrl.split('/').pop();
+                        document.body.appendChild(link);
+                        link.click();
+                        document.body.removeChild(link);
+                    }
+                    setMessage('Downloaded TIFFs');
+                }
+            } catch (error) {
+                setMessage(`Error downloading: ${error.message}`, true);
+            } finally {
+                downloadButton.disabled = false;
+                downloadButton.classList.remove('loading');
+            }
+        }
+
+        function initEventListeners() {
+            document.getElementById('shapefileInput').addEventListener('change', handleShapefileUpload);
+            document.getElementById('yearSelect').addEventListener('change', async (e) => {
+                document.getElementById('monthSelect').innerHTML = '<option value="">Select Month</option>';
+                document.getElementById('monthlyTiffList').innerHTML = '';
+                if (e.target.value) {
+                    const { yearMonthMap } = await fetchYearsAndMonths();
+                    populateDropdown('monthSelect', yearMonthMap[e.target.value] || [], 'Select Month');
+                }
+            });
+            document.getElementById('monthSelect').addEventListener('change', (e) => {
+                document.getElementById('monthlyTiffList').innerHTML = '';
+                if (e.target.value) {
+                    populateMonthlyTiffList(document.getElementById('yearSelect').value, e.target.value);
+                }
+            });
+            document.getElementById('loadMoreTiffs').addEventListener('click', () => {
+                currentTiffPage++;
+                renderTiffList(allTiffs, currentTiffPage);
+            });
+            document.getElementById('downloadButton').addEventListener('click', handleDownload);
+        }
+
+        function checkDependencies() {
+            if (typeof axios === 'undefined') {
+                setMessage('Axios not loaded.', true);
+                return false;
+            }
+            if (typeof L === 'undefined') {
+                setMessage('Leaflet not loaded.', true);
+                return false;
+            }
+            if (typeof shp === 'undefined') {
+                setMessage('shpjs not loaded.', true);
+                return false;
+            }
+            return true;
+        }
+
+        async function checkServer() {
+            try {
+                const response = await axios.get(`${flaskBaseUrl}/health`, { timeout: 2000 });
+                if (response.status === 200) {
+                    document.getElementById('downloadButton').disabled = false;
+                    setMessage('Flask server detected.');
+                }
+            } catch (error) {
+                setMessage('Flask server not detected.', true);
+                document.getElementById('downloadButton').disabled = true;
+            }
+        }
+
+        try {
+            if (checkDependencies()) {
+                initMap();
+                fetchYearsAndMonths().then(({ years, yearMonthMap }) => {
+                    populateDropdown('yearSelect', years);
+                });
+                initEventListeners();
+                checkServer();
+            } else {
+                setMessage('Dependencies failed to load.', true);
+            }
+        } catch (e) {
+            setMessage(`Error initializing app: ${e.message}`, true);
+        }
+    </script>
+</body>
+</html>
