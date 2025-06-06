@@ -212,7 +212,7 @@ def process_raster():
             result = np.where(np.isnan(result), nodata, result).astype(meta['dtype'])
 
         output = BytesIO()
-        with rasterio.open(output, 'w', **meta) as dst:  # Use meta directly
+        with rasterio.open(output, 'w', **meta) as dst:
             dst.write(result)
         output.seek(0)
 
@@ -229,4 +229,5 @@ def process_raster():
         return {"error": str(e)}, 500
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    port = int(os.environ.get('PORT', 5000))  # Use Render's PORT or default to 5000
+    app.run(host='0.0.0.0', port=port, debug=False)  # Bind to 0.0.0.0, disable debug
